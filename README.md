@@ -146,6 +146,49 @@ notify.conf.example   推送配置样例（不含任何密钥）
 - **某仓库一直显示「已分叉」**：这是本地与远端各有新提交，需要手动 merge/rebase，工具不会碰它。
 - **token 泄露了怎么办**：去对应平台重置，然后改 `notify.conf` 一个文件即可。
 
+## 接到 WorkBuddy：把报告发到邮箱（可选）
+
+脚本自己只会弹 PushPlus（微信）。要收 HTML 邮件，用 WorkBuddy 的定时任务 + Agent Mail 补一段：
+
+```
+launchd（08:50 / 13:50 + 解锁）→ git-sync.sh → last-report.html
+WorkBuddy automation（08:52 / 14:02）→ 读 last-report.html
+Agent Mail → HTML 邮件 → 你的邮箱（手机装邮箱 App 收推送）
+```
+
+**关键是错峰**：automation 比 launchd 晚 2 分钟，并且**只读报告、不再跑脚本**，
+否则两次运行报告内容会打架。报告太旧（>15 分钟，说明 launchd 那次没跑成）时才兜底跑一次。
+
+在 WorkBuddy 里新建两条定时任务（08:52 和 14:02），prompt 用：
+
+```
+把本机的仓库同步报告以 HTML 邮件发出。默认不重复跑同步——同步由 launchd 完成，这里只负责发信。
+
+第一步 确认报告是新的
+- 文件：$HOME/.local/state/git-sync/last-report.html
+- 若不存在或距今超过 15 分钟（说明那次定时没跑成），才执行 bash "$HOME/bin/git-sync/git-sync.sh"
+- 正常情况下不要再跑，避免与 launchd 重复同步
+- 扫描范围由 ~/.config/git-sync/config.conf 的 ROOTS 决定，不要写死路径
+
+第二步 读取 $HOME/.local/state/git-sync/last-report.html
+（device 字段在 state.json）
+
+第三步 用 Agent Mail 发送，skip_confirmation=true：
+  to 你的邮箱，cc 存档地址
+  subject: <device> · 同步报告 <YYYY-MM-DD HH:MM>
+  body: last-report.html 全文原样，body_format=HTML
+  禁止改写/重新排版/包 <pre>/只发摘要；文件缺失才退回 last-report.txt + PLAIN
+
+异常：引擎不存在则不发信只提示安装；脚本非零退出在正文开头补原因；
+报告显示 0 个仓库但 ROOTS 路径存在，要提示可能是外接盘未挂载
+```
+
+注意事项：
+
+- Agent Mail 有每日发送配额（默认 50 封/天）和每分钟限流，一天 2 封完全够用；
+- 它只保证邮件投递，**手机要响还得在手机邮箱 App 里开启通知**；
+- launchd 是系统级、WorkBuddy 是客户端级——客户端没开时 automation 不执行，但同步照常，PushPlus 仍会提醒。
+
 ## 更新
 
 本仓库只放工具本体，不含任何个人配置与密钥。改完推上来后，其他机器上：
