@@ -73,6 +73,15 @@ PROVIDER_NAME="GitLab"           # 报告措辞，可改 Gitee / GitHub
 
 手工补充仓库：在 `~/.config/git-sync/repos.txt` 里每行写一个仓库路径（`#` 为注释）。
 
+多目录很常见——比如内网仓库放在移动硬盘、个人项目放在家目录：
+
+```bash
+ROOTS="/Volumes/work/projects,$HOME/Documents/gitlab"
+```
+
+磁盘没挂载时那一条会被跳过，报告里的仓库数会变少，所以建议把邮件报告里的
+「0 个仓库」判断一起用上（见下一节），免得盘不在还以为是全部同步完了。
+
 ## 触发机制
 
 | 方式 | 实现 | 说明 |
@@ -120,6 +129,7 @@ ui/index.html         可视化界面前端
 report-template.html  HTML 报告模板
 config.conf.example   配置样例
 notify.conf.example   推送配置样例（不含任何密钥）
+CHANGELOG.md          版本与修复记录
 ```
 
 安装后的落点：
@@ -131,6 +141,16 @@ notify.conf.example   推送配置样例（不含任何密钥）
 ~/.local/state/git-sync/   状态（state.json / last-report.html / sync.log）
 ~/Library/LaunchAgents/    定时任务 io.gsync.timer / io.gsync.unlock
 ```
+
+## 已验证场景
+
+在本机（macOS，2 个 LaunchAgent + 17 个仓库：外接盘 2 个 + 家目录 15 个）实测通过：
+
+- 定时与解锁双触发共存，进程锁生效，不会互相打架；
+- 脏工作区（单个仓库 8347 个改动文件）只跳过不中断——这是 v1.0.1 修掉的坑；
+- 分叉（领先 1 / 落后 3）、冲突中、Gitee 无凭据 401 三种异常都只记录并进「需要你处理」，
+  没有改动任何工作区；
+- HTML 报告四列表格在邮件客户端正常渲染，不含 ANSI 转义。
 
 ## 常见问题
 
