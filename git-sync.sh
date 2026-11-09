@@ -212,6 +212,9 @@ emit() {
   local name="$1" path="$2" branch="$3" status="$4" ahead="$5" behind="$6" dirty="$7" detail="$8"
   local note=""
 
+  # 清掉 git 输出里的 ANSI 颜色码，否则 JSON / 文本 / HTML 报告与邮件里会出现 [31m 之类的乱码
+  detail=$(printf '%s' "$detail" | sed $'s/\033\\[[0-9;]*m//g' | tr -d '\r')
+
   jq -nc \
     --arg n "$name" --arg p "$path" --arg b "$branch" --arg s "$status" \
     --argjson a "${ahead:-0}" --argjson h "${behind:-0}" --argjson d "${dirty:-0}" \
@@ -282,7 +285,7 @@ while IFS= read -r repo; do
   fi
 
   # 5. fetch（只读，不改工作区）
-  fetch_err=$(git -C "$repo" -c http.lowSpeedLimit=2000 -c http.lowSpeedTime=25 \
+  fetch_err=$(git -C "$repo" -c http.lowSpeedLimit=2000 -c http.lowSpeedTime=25 -c color.ui=never \
               fetch --prune --quiet 2>&1)
   if [ $? -ne 0 ]; then
     short=$(printf '%s' "$fetch_err" | head -1 | cut -c1-90)
@@ -324,7 +327,10 @@ while IFS= read -r repo; do
   fi
 
   if [ "$tracked_dirty" -gt 0 ]; then
-    files=$(printf '%s\n' "$st" | awk 'NF && $0 !~ /^\?\?/ {print $2}' | head -3 | paste -sd ', ' -)
+    # 注意：不要用 `| head -3` 截断。head 提前退出会让上游 awk 收到 SIGPIPE，
+    # 而 printf 是 shell 内建，SIGPIPE 会直接打死整个脚本（脏文件上千个时必现）。
+    # 全部交给一段 awk 完成，读完全部输入，不产生 SIGPIPE。
+    files=$(printf '%s\n' "$st" | awk 'NF && $0 !~ /^\?\?/ {n++; if (n<=3) printf "%s%s", (n>1?", ":""), $2}')
     emit "$name" "$repo" "$branch" "dirty" "$ahead" "$behind" "$tracked_dirty" \
       "落后 ${behind}，但 ${tracked_dirty} 个文件已改动（${files}）"
     continue
