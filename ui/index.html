@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>gsync · 仓库同步设置</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --panel-2:#fbfbfc; --border:#e2e5ea; --border-strong:#d2d7de;
+    --text:#1b1e23; --muted:#69707d; --faint:#9aa1ac;
+    --accent:#0b5fff; --accent-soft:#eaf0ff; --accent-border:#c7d8ff;
+    --ok:#0d7a3f; --ok-soft:#e7f6ed; --warn:#9a6410; --warn-soft:#fdf4e3; --err:#bf2626; --err-soft:#fdeceb;
+    --shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#131519; --panel:#1b1e24; --panel-2:#20242b; --border:#2c313a; --border-strong:#3a404b;
+      --text:#e9ecf1; --muted:#9aa2b1; --faint:#6f7784;
+      --accent:#5b8cff; --accent-soft:#1c2740; --accent-border:#2f4266;
+      --ok:#4cc38a; --ok-soft:#14261c; --warn:#e0a83a; --warn-soft:#2a2113; --err:#f0666a; --err-soft:#2b1718;
+      --shadow:0 1px 2px rgba(0,0,0,.3);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--bg); color:var(--text);
+    font:14px/1.6 -apple-system,BlinkMacSystemFont,"SF Pro SC","PingFang SC","Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1120px;margin:0 auto;padding:32px 24px 64px}
+  header{display:flex;align-items:center;gap:14px;margin-bottom:24px;flex-wrap:wrap}
+  .logo{
+    width:36px;height:36px;border-radius:10px;background:var(--accent);color:#fff;
+    display:grid;place-items:center;font-weight:700;font-size:15px;letter-spacing:-.5px;flex:none;
+  }
+  h1{font-size:18px;margin:0;font-weight:600;letter-spacing:-.2px}
+  .sub{color:var(--muted);font-size:12.5px;margin-top:1px}
+  .chip{
+    margin-left:auto;display:inline-flex;align-items:center;gap:7px;
+    background:var(--panel);border:1px solid var(--border);border-radius:99px;
+    padding:5px 12px;font-size:12.5px;color:var(--muted);box-shadow:var(--shadow)
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.ok{background:var(--ok)} .dot.warn{background:var(--warn)} .dot.err{background:var(--err)}
+
+  .grid{display:grid;grid-template-columns:minmax(0,1.12fr) minmax(0,.88fr);gap:18px;align-items:start}
+  @media (max-width:900px){ .grid{grid-template-columns:1fr} }
+
+  .card{
+    background:var(--panel);border:1px solid var(--border);border-radius:14px;
+    box-shadow:var(--shadow);overflow:hidden
+  }
+  .card + .card{margin-top:18px}
+  .card-head{
+    display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border);
+    background:var(--panel-2)
+  }
+  .card-head h2{font-size:13.5px;margin:0;font-weight:600}
+  .card-head .hint{font-size:12px;color:var(--faint);margin-left:auto}
+  .card-body{padding:18px}
+
+  .field{margin-bottom:18px}
+  .field:last-child{margin-bottom:0}
+  label.lbl{display:block;font-size:12.5px;font-weight:600;margin-bottom:6px}
+  .desc{font-size:12px;color:var(--muted);margin:5px 0 0;line-height:1.55}
+  input[type=text],input[type=number],textarea{
+    width:100%;padding:9px 11px;border:1px solid var(--border-strong);border-radius:9px;
+    background:var(--panel);color:var(--text);font-size:13px;font-family:inherit;
+    transition:border-color .15s,box-shadow .15s;outline:none
+  }
+  textarea{resize:vertical;min-height:64px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12.5px;line-height:1.7}
+  input:focus,textarea:focus{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+  .row2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+
+  .suggest{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}
+  .sbtn{
+    border:1px dashed var(--border-strong);background:transparent;color:var(--muted);
+    border-radius:8px;padding:4px 9px;font-size:12px;cursor:pointer;font-family:inherit
+  }
+  .sbtn:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+
+  .switch{display:flex;align-items:center;gap:11px;cursor:pointer;user-select:none}
+  .switch input{display:none}
+  .track{width:42px;height:24px;border-radius:99px;background:var(--border-strong);position:relative;transition:background .18s;flex:none}
+  .track::after{
+    content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;
+    background:#fff;transition:transform .18s;box-shadow:0 1px 3px rgba(0,0,0,.25)
+  }
+  .switch input:checked + .track{background:var(--accent)}
+  .switch input:checked + .track::after{transform:translateX(18px)}
+  .switch .txt{font-size:13px}
+
+  .btns{display:flex;gap:9px;flex-wrap:wrap;margin-top:20px;padding-top:18px;border-top:1px solid var(--border)}
+  button{
+    font-family:inherit;font-size:13px;padding:8px 15px;border-radius:9px;cursor:pointer;
+    border:1px solid var(--border-strong);background:var(--panel);color:var(--text);
+    transition:background .15s,border-color .15s,opacity .15s
+  }
+  button:hover{border-color:var(--accent);color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{opacity:.9;color:#fff}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  button.ghost{background:transparent}
+
+  .stats{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+  .stat{background:var(--panel-2);border:1px solid var(--border);border-radius:11px;padding:12px 13px}
+  .stat .k{font-size:11.5px;color:var(--faint);margin-bottom:5px}
+  .stat .v{font-size:14px;font-weight:600;display:flex;align-items:center;gap:6px}
+  .stat .v small{font-weight:400;color:var(--muted);font-size:11.5px}
+
+  .counts{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}
+  .cnt{border-radius:10px;padding:9px 6px;text-align:center;border:1px solid transparent}
+  .cnt b{display:block;font-size:17px;line-height:1.2}
+  .cnt span{font-size:11px;color:var(--muted)}
+  .cnt.c1{background:var(--accent-soft);border-color:var(--accent-border)} .cnt.c1 b{color:var(--accent)}
+  .cnt.c2{background:var(--panel-2);border-color:var(--border)} .cnt.c2 b{color:var(--muted)}
+  .cnt.c3{background:var(--warn-soft)} .cnt.c3 b{color:var(--warn)}
+  .cnt.c4{background:var(--err-soft)} .cnt.c4 b{color:var(--err)}
+
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th{
+    text-align:left;font-weight:600;color:var(--muted);font-size:11.5px;
+    padding:9px 12px;border-bottom:1px solid var(--border);white-space:nowrap
+  }
+  td{padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td.repo{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+  td.branch{color:var(--muted);font-size:12px;word-break:break-all}
+  td.note{color:var(--muted);font-size:12px}
+  .pill{
+    display:inline-block;padding:1.5px 8px;border-radius:99px;font-size:11.5px;font-weight:600;white-space:nowrap
+  }
+  .pill.b{background:var(--accent-soft);color:var(--accent)}
+  .pill.g{background:var(--ok-soft);color:var(--ok)}
+  .pill.y{background:var(--warn-soft);color:var(--warn)}
+  .pill.r{background:var(--err-soft);color:var(--err)}
+  .pill.n{background:var(--panel-2);color:var(--muted)}
+
+  .empty{padding:34px 18px;text-align:center;color:var(--faint);font-size:13px}
+  pre.out{
+    margin:0;padding:14px 16px;background:var(--panel-2);border-top:1px solid var(--border);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;line-height:1.65;
+    color:var(--muted);max-height:260px;overflow:auto;white-space:pre-wrap;word-break:break-word
+  }
+  .toast{
+    position:fixed;left:50%;bottom:28px;transform:translate(-50%,14px);opacity:0;pointer-events:none;
+    background:var(--text);color:var(--bg);padding:10px 18px;border-radius:10px;font-size:13px;
+    transition:opacity .2s,transform .2s;max-width:80vw;box-shadow:0 8px 24px rgba(0,0,0,.18);z-index:99
+  }
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  .toast.err{background:var(--err);color:#fff}
+  .foot{margin-top:26px;font-size:11.5px;color:var(--faint);line-height:1.9}
+  .foot code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--panel-2);padding:1px 5px;border-radius:4px;border:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">gs</div>
+    <div>
+      <h1>仓库同步设置</h1>
+      <div class="sub" id="sub">读取中…</div>
+    </div>
+    <div class="chip"><span class="dot" id="statusDot"></span><span id="statusText">检查中</span></div>
+  </header>
+
+  <div class="grid">
+    <!-- 左：配置 -->
+    <div>
+      <div class="card">
+        <div class="card-head">
+          <h2>同步设置</h2>
+          <span class="hint">改完点保存</span>
+        </div>
+        <div class="card-body">
+          <div class="field">
+            <label class="lbl" for="roots">仓库目录</label>
+            <textarea id="roots" spellcheck="false" placeholder="~/Documents/gitlab"></textarea>
+            <p class="desc">多个目录用英文逗号分隔。可以填「放多个仓库的父目录」，也可以直接指向某个仓库。</p>
+            <div class="suggest" id="suggest"></div>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="times">每天同步时间</label>
+            <input type="text" id="times" spellcheck="false" placeholder="08:50,13:50">
+            <p class="desc">24 小时制，多个用英文逗号分隔；留空则不启用定时同步。</p>
+            <div class="suggest" id="timePresets"></div>
+          </div>
+
+          <div class="field">
+            <label class="switch" for="unlock">
+              <input type="checkbox" id="unlock">
+              <span class="track"></span>
+              <span class="txt">解锁屏幕 / 唤醒电脑后同步一次</span>
+            </label>
+            <p class="desc">每 60 秒检查一次锁屏状态，真正解锁后才执行；同一次解锁不会重复触发。</p>
+          </div>
+
+          <div class="row2">
+            <div class="field">
+              <label class="lbl" for="interval">解锁触发最小间隔</label>
+              <input type="number" id="interval" min="5" max="1440" step="5">
+              <p class="desc">分钟。避免频繁锁屏解锁反复同步。</p>
+            </div>
+            <div class="field">
+              <label class="lbl" for="depth">扫描深度</label>
+              <input type="number" id="depth" min="1" max="5" step="1">
+              <p class="desc">仓库直接放在目录下用 2；再多一层用 3。</p>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="lbl" for="provider">产品名</label>
+            <input type="text" id="provider" spellcheck="false" placeholder="GitLab">
+            <p class="desc">只影响报告和推送标题的措辞。</p>
+          </div>
+
+          <div class="btns">
+            <button class="primary" id="btnSave">保存配置</button>
+            <button id="btnApply">保存并重载定时任务</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 右：状态 -->
+    <div>
+      <div class="card">
+        <div class="card-head"><h2>当前状态</h2></div>
+        <div class="card-body">
+          <div class="stats">
+            <div class="stat"><div class="k">最近一次同步</div><div class="v" id="lastRun">—</div></div>
+            <div class="stat"><div class="k">定时触发</div><div class="v" id="agentTimer">—</div></div>
+            <div class="stat"><div class="k">解锁触发</div><div class="v" id="agentUnlock">—</div></div>
+            <div class="stat"><div class="k">手机推送</div><div class="v" id="notifyState">—</div></div>
+          </div>
+          <div class="counts">
+            <div class="cnt c1"><b id="cUpd">0</b><span>已更新</span></div>
+            <div class="cnt c2"><b id="cOk">0</b><span>已最新</span></div>
+            <div class="cnt c3"><b id="cSkip">0</b><span>跳过</span></div>
+            <div class="cnt c4"><b id="cErr">0</b><span>异常</span></div>
+          </div>
+          <div class="btns">
+            <button id="btnDry">预演一次</button>
+            <button id="btnRun">立即同步</button>
+            <button class="ghost" id="btnReport">查看报告</button>
+          </div>
+        </div>
+        <pre class="out" id="out" hidden></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>仓库</h2><span class="hint" id="repoHint"></span></div>
+        <div id="repoWrap"><div class="empty">还没有运行记录</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot" id="foot"></div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+(function(){
+  var $ = function(id){ return document.getElementById(id); };
+  var state = null;
+
+  function toast(msg, isErr){
+    var t = $('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (isErr ? ' err' : '');
+    clearTimeout(t._h);
+    t._h = setTimeout(function(){ t.className = 'toast'; }, 2600);
+  }
+
+  function api(path, opts){
+    return fetch(path, opts || {}).then(function(r){
+      return r.json().catch(function(){ return {}; });
+    });
+  }
+
+  var LABEL = {
+    'updated':['已更新','b'], 'would-update':['可更新','b'], 'uptodate':['已最新','g'],
+    'ahead':['待推送','y'], 'dirty':['有改动','y'], 'diverged':['已分叉','r'],
+    'conflict':['冲突中','r'], 'busy':['处理中','r'], 'detached':['游离 HEAD','r'],
+    'locked':['锁残留','r'], 'blocked-untracked':['未跟踪冲突','r'],
+    'noupstream':['无上游','n'], 'error':['异常','r']
+  };
+  var RANK = {error:0,conflict:1,busy:1,diverged:1,locked:1,'blocked-untracked':1,
+              detached:2,ahead:3,dirty:3,updated:4,'would-update':4,uptodate:5,noupstream:6};
+
+  function ago(iso){
+    if(!iso) return '—';
+    var t = Date.parse(iso.replace(/(\d{2})(\d{2})$/, '$1:$2'));
+    if(isNaN(t)) t = Date.parse(iso);
+    if(isNaN(t)) return iso;
+    var d = Math.max(0, Date.now() - t);
+    var m = Math.round(d/60000);
+    if(m < 1) return '刚刚';
+    if(m < 60) return m + ' 分钟前';
+    var h = Math.floor(m/60);
+    if(h < 24) return h + ' 小时前';
+    return Math.floor(h/24) + ' 天前';
+  }
+
+  function setBadge(id, on, onText, offText){
+    var el = $(id);
+    el.innerHTML = '';
+    var d = document.createElement('span');
+    d.className = 'dot ' + (on ? 'ok' : 'warn');
+    el.appendChild(d);
+    el.appendChild(document.createTextNode(on ? onText : offText));
+  }
+
+  function renderOverview(d){
+    state = d;
+    $('sub').textContent = d.device + ' · ' + (d.roots.length ? d.roots.map(function(r){ return r.raw; }).join('  ') : '未设置目录');
+
+    var cfg = d.config || {};
+    $('roots').value = cfg.ROOTS || '';
+    $('times').value = cfg.TIMES || '';
+    $('unlock').checked = (cfg.SYNC_ON_UNLOCK === '1');
+    $('interval').value = cfg.UNLOCK_MIN_INTERVAL || 60;
+    $('depth').value = cfg.SCAN_DEPTH || 2;
+    $('provider').value = cfg.PROVIDER_NAME || 'GitLab';
+
+    // 目录状态
+    var bad = d.roots.filter(function(r){ return !r.exists; });
+    var dot = $('statusDot'), txt = $('statusText');
+    if(bad.length){
+      dot.className = 'dot err'; txt.textContent = bad.length + ' 个目录不可读';
+    } else if(d.state && d.state.summary && d.state.summary.error){
+      dot.className = 'dot err'; txt.textContent = '有仓库同步失败';
+    } else if(d.roots.length){
+      dot.className = 'dot ok'; txt.textContent = d.roots.reduce(function(a,r){ return a + r.count; }, 0) + ' 个仓库';
+    } else {
+      dot.className = 'dot warn'; txt.textContent = '待配置';
+    }
+
+    // 最近一次
+    if(d.state){
+      $('lastRun').innerHTML = ago(d.state.timestamp) +
+        ' <small>' + (d.state.dry_run ? '预演' : '') + '</small>';
+      var s = d.state.summary || {};
+      $('cUpd').textContent = (s.updated || 0) + (s.would_update || 0);
+      $('cOk').textContent = s.uptodate || 0;
+      $('cSkip').textContent = s.skipped || 0;
+      $('cErr').textContent = s.error || 0;
+    } else {
+      $('lastRun').textContent = '尚未运行';
+    }
+
+    setBadge('agentTimer', d.agents.timer, '已加载', '未加载');
+    setBadge('agentUnlock', d.agents.unlock, '已加载', '未加载');
+
+    var n = d.notify || {};
+    var nEl = $('notifyState');
+    nEl.innerHTML = '';
+    var nd = document.createElement('span');
+    if(n.ready){
+      nd.className = 'dot ok';
+      var names = {pushplus:'微信', wecom:'企业微信', bark:'Bark'};
+      nEl.appendChild(nd);
+      nEl.appendChild(document.createTextNode(names[n.type] || n.type));
+    } else {
+      nd.className = 'dot';
+      nEl.appendChild(nd);
+      nEl.appendChild(document.createTextNode(n.type ? '缺凭证' : '未配置'));
+    }
+
+    renderRepos(d.state);
+    $('foot').innerHTML =
+      '配置 <code>' + (d.paths.conf_dir || '') + '/config.conf</code>　' +
+      '报告 <code>' + (d.paths.state_dir || '') + '/last-report.html</code>　' +
+      '命令 <code>gsync status</code> / <code>gsync log</code>';
+  }
+
+  function renderRepos(st){
+    var wrap = $('repoWrap');
+    if(!st || !st.repos || !st.repos.length){
+      wrap.innerHTML = '<div class="empty">还没有运行记录，点「预演一次」看看会拉什么</div>';
+      $('repoHint').textContent = '';
+      return;
+    }
+    $('repoHint').textContent = st.repos.length + ' 个 · ' + (st.device || '');
+    var rows = st.repos.slice().sort(function(a,b){
+      return (RANK[a.status] === undefined ? 7 : RANK[a.status]) - (RANK[b.status] === undefined ? 7 : RANK[b.status]);
+    });
+    var h = '<table><thead><tr><th>仓库</th><th>分支</th><th>状态</th><th>说明</th></tr></thead><tbody>';
+    rows.forEach(function(r){
+      var m = LABEL[r.status] || [r.status,'n'];
+      h += '<tr><td class="repo">' + esc(r.name) + '</td>' +
+           '<td class="branch">' + esc(r.branch || '—') + '</td>' +
+           '<td><span class="pill ' + m[1] + '">' + m[0] + '</span></td>' +
+           '<td class="note">' + esc(r.detail || '') + '</td></tr>';
+    });
+    h += '</tbody></table>';
+    wrap.innerHTML = h;
+  }
+
+  function esc(s){
+    return String(s == null ? '' : s).replace(/[&<>"]/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];
+    });
+  }
+
+  function load(){
+    api('/api/overview').then(renderOverview).catch(function(){
+      toast('读取配置失败', true);
+    });
+    api('/api/discover').then(function(d){
+      var box = $('suggest');
+      box.innerHTML = '';
+      (d.suggestions || []).forEach(function(s){
+        var b = document.createElement('button');
+        b.className = 'sbtn';
+        b.textContent = s.path.replace(/^\/Users\/[^/]+/, '~') + ' · ' + s.count;
+        b.onclick = function(){
+          var cur = $('roots').value.trim();
+          if(cur.indexOf(s.path) >= 0) return;
+          $('roots').value = cur ? cur.replace(/,\s*$/, '') + ',' + s.path : s.path;
+        };
+        box.appendChild(b);
+      });
+    }).catch(function(){});
+  }
+
+  function collect(){
+    return {
+      ROOTS: $('roots').value.trim().replace(/\s*\n\s*/g, ','),
+      TIMES: $('times').value.trim(),
+      SYNC_ON_UNLOCK: $('unlock').checked ? '1' : '0',
+      UNLOCK_MIN_INTERVAL: String($('interval').value || 60),
+      SCAN_DEPTH: String($('depth').value || 2),
+      PROVIDER_NAME: $('provider').value.trim() || 'GitLab'
+    };
+  }
+
+  function save(){
+    return api('/api/config', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(collect())
+    }).then(function(r){
+      if(!r.ok){
+        toast((r.errors || ['保存失败']).join('；'), true);
+        return false;
+      }
+      toast('配置已保存');
+      return api('/api/overview').then(renderOverview).then(function(){ return true; });
+    });
+  }
+
+  function showOut(text, isErr){
+    var o = $('out');
+    o.hidden = false;
+    o.textContent = text || '(无输出)';
+    o.style.color = isErr ? 'var(--err)' : '';
+  }
+
+  function runSync(dry){
+    var btn = dry ? $('btnDry') : $('btnRun');
+    var old = btn.textContent;
+    btn.disabled = true; btn.textContent = dry ? '预演中…' : '同步中…';
+    showOut('正在执行，请稍候…', false);
+    api('/api/run', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({dry: !!dry})
+    }).then(function(r){
+      showOut(r.output, !r.ok);
+      if(r.ok) toast(dry ? '预演完成' : '同步完成');
+      else toast('执行结束但有异常，见下方输出', true);
+      return api('/api/overview').then(renderOverview);
+    }).catch(function(){
+      showOut('请求失败，可能是服务已退出', true);
+    }).then(function(){
+      btn.disabled = false; btn.textContent = old;
+    });
+  }
+
+  $('btnSave').onclick = function(){ save(); };
+  $('btnApply').onclick = function(){
+    var b = this; b.disabled = true;
+    save().then(function(ok){
+      if(!ok) return;
+      return api('/api/apply', {method:'POST'}).then(function(r){
+        toast(r.ok ? '定时任务已重载' : '重载失败，见终端提示', !r.ok);
+        showOut(r.output, !r.ok);
+        return api('/api/overview').then(renderOverview);
+      });
+    }).then(function(){ b.disabled = false; });
+  };
+  $('btnDry').onclick = function(){ runSync(true); };
+  $('btnRun').onclick = function(){ runSync(false); };
+  $('btnReport').onclick = function(){ window.open('/report', '_blank'); };
+  $('unlock').onchange = function(){ /* 仅改变本地状态，保存时提交 */ };
+
+  // 时间快捷项
+  (function(){
+    var presets = ['08:50,13:50','09:00','09:00,14:00,19:00','10:00,16:00'];
+    var box = $('timePresets');
+    presets.forEach(function(p){
+      var b = document.createElement('button');
+      b.className = 'sbtn'; b.textContent = p;
+      b.onclick = function(){ $('times').value = p; };
+      box.appendChild(b);
+    });
+  })();
+
+  load();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+# 推送通道：pushplus（微信）/ wecom（企业微信群机器人）/ bark（iOS）
+NOTIFY_TYPE=pushplus
+PUSHPLUS_TOKEN=
+
+# 企业微信机器人（可选，改用这条时把 NOTIFY_TYPE 改成 wecom）
+# WECOM_WEBHOOK=
+
+# 每次运行都推送（1=是，默认只在状态变化时推）
+# PUSH_ALWAYS=1
+
+# 标题里显示的设备名，默认取「系统设置 → 通用 → 关于本机」的名称
+# DEVICE_NAME=公司iMac

@@ -1,0 +1,67 @@
+<!--
+  GitLab 同步报告 · HTML 邮件模板
+  ------------------------------------------------
+  本文件由 git-sync.sh 每次运行时读取并渲染，下面这些标记会被替换成实际数据。
+  想调整邮件样式（配色、列宽、字号、是否显示某列）直接改这里即可，不需要动脚本。
+
+  可用标记（写作两个花括号包裹的大写名，本注释内故意不写全，以免被替换）：
+    TITLE       标题，形如「YC的Mac mini · GitLab 同步报告」
+    TIME        时间，形如「2026-11-09 19:11」
+    N_TOTAL     仓库总数
+    N_UPDATED   本次已更新（预演模式下显示「可更新」的数量）
+    N_UPTODATE  已是最新
+    N_SKIPPED   跳过
+    N_ERROR     异常
+    ROWS        表格数据行，已按优先级排序
+    BLOCKERS    「需要你处理」提示块，无待处理项时为空
+    FOOTER      页脚说明
+
+  注意：邮件客户端对 CSS 支持有限，请全部使用内联样式，不要引入 style 标签或 class。
+-->
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;font-size:14px;color:#1f2328;line-height:1.6">
+
+  <h2 style="margin:0 0 4px;font-size:18px;font-weight:600">{{TITLE}}</h2>
+  <p style="margin:0 0 14px;color:#6e7781;font-size:13px">{{TIME}}</p>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:6px 0;margin:0 0 16px">
+    <tr>
+      <td style="background:#ddf4ff;border-radius:6px;padding:8px 16px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#0969da;line-height:1.2">{{N_UPDATED}}</div>
+        <div style="font-size:11px;color:#57606a">已更新</div>
+      </td>
+      <td style="background:#f6f8fa;border-radius:6px;padding:8px 16px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#57606a;line-height:1.2">{{N_UPTODATE}}</div>
+        <div style="font-size:11px;color:#57606a">已最新</div>
+      </td>
+      <td style="background:#fff8c5;border-radius:6px;padding:8px 16px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#9a6700;line-height:1.2">{{N_SKIPPED}}</div>
+        <div style="font-size:11px;color:#57606a">跳过</div>
+      </td>
+      <td style="background:#ffebe9;border-radius:6px;padding:8px 16px;text-align:center">
+        <div style="font-size:18px;font-weight:700;color:#cf222e;line-height:1.2">{{N_ERROR}}</div>
+        <div style="font-size:11px;color:#57606a">异常</div>
+      </td>
+      <td style="padding:8px 10px;vertical-align:middle;font-size:12px;color:#6e7781">
+        共 {{N_TOTAL}} 个仓库
+      </td>
+    </tr>
+  </table>
+
+  <table style="border-collapse:collapse;width:100%;font-size:13px">
+    <thead>
+      <tr style="background:#f6f8fa">
+        <th style="border:1px solid #d0d7de;padding:8px 10px;text-align:left;white-space:nowrap">仓库</th>
+        <th style="border:1px solid #d0d7de;padding:8px 10px;text-align:left">分支</th>
+        <th style="border:1px solid #d0d7de;padding:8px 10px;text-align:left;white-space:nowrap">状态</th>
+        <th style="border:1px solid #d0d7de;padding:8px 10px;text-align:left">说明</th>
+      </tr>
+    </thead>
+    <tbody>
+{{ROWS}}
+    </tbody>
+  </table>
+
+{{BLOCKERS}}
+
+  <p style="margin:16px 0 0;color:#8c959f;font-size:12px">{{FOOTER}}</p>
+</div>

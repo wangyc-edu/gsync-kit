@@ -1,0 +1,740 @@
+#!/bin/bash
+# gsync - 多仓库安全同步工具（macOS）
+#
+# 一条命令完成安装、配置、定时、解锁触发与可视化设置。
+#
+# 用法：
+#   gsync install                 安装（交互式，可一路回车用默认值）
+#   gsync install --root ~/code --time 09:10,14:10 --unlock on
+#   gsync reload                  改完配置后重新生成并加载定时任务
+#   gsync ui                      打开浏览器可视化配置界面
+#   gsync run                     立即同步一次
+#   gsync run -n                  预演，只报告不修改
+#   gsync status                  查看配置、定时状态与仓库结果
+#   gsync config                  查看配置；--edit 编辑；--set K=V 直接改
+#   gsync log -n 50               查看运行日志
+#   gsync doctor                  环境自检
+#   gsync uninstall [--purge]     卸载（--purge 连配置和状态一起删）
+
+set -uo pipefail
+
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin:$HOME/.local/bin"
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+
+# ---------- 自身位置（支持软链接调用） ----------
+SELF="$0"
+while [ -L "$SELF" ]; do
+  _t="$(readlink "$SELF")"
+  case "$_t" in
+    /*) SELF="$_t" ;;
+    *)  SELF="$(cd "$(dirname "$SELF")" && pwd)/$_t" ;;
+  esac
+done
+SRC_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+
+HOME_REAL="${HOME:-$(cd ~ && pwd)}"
+BIN_DIR="$HOME_REAL/bin/git-sync"
+CONF_DIR="${GSYNC_CONF_DIR:-$HOME_REAL/.config/git-sync}"
+STATE_DIR="${GIT_SYNC_STATE_DIR:-$HOME_REAL/.local/state/git-sync}"
+CONFIG_FILE="$CONF_DIR/config.conf"
+NOTIFY_FILE="$CONF_DIR/notify.conf"
+AGENT_DIR="$HOME_REAL/Library/LaunchAgents"
+ENGINE="$BIN_DIR/git-sync.sh"
+PLIST_TIMER="$AGENT_DIR/io.gsync.timer.plist"
+PLIST_UNLOCK="$AGENT_DIR/io.gsync.unlock.plist"
+L_TIMER="io.gsync.timer"
+L_UNLOCK="io.gsync.unlock"
+L_LEGACY="com.chnwangyc.gitlab-sync"
+UID_NUM="$(id -u)"
+CLI_ON_PATH=0
+CLI_RC_WRITTEN=""
+LOAD_ERR=""
+
+if [ -t 1 ]; then
+  C_0=$'\033[0m'; C_D=$'\033[2m'; C_B=$'\033[1m'
+  C_R=$'\033[31m'; C_G=$'\033[32m'; C_Y=$'\033[33m'; C_C=$'\033[36m'
+else
+  C_0=""; C_D=""; C_B=""; C_R=""; C_G=""; C_Y=""; C_C=""
+fi
+
+interactive() {
+  [ -t 0 ] && [ -t 1 ] && [ "${GSYNC_NONINTERACTIVE:-0}" != "1" ]
+}
+
+say()  { printf '%s\n' "$*"; }
+step() { printf '%s==>%s %s\n' "$C_C" "$C_0" "$*"; }
+warn() { printf '%s!!%s %s\n' "$C_Y" "$C_0" "$*" >&2; }
+die()  { printf '%s!!%s %s\n' "$C_R" "$C_0" "$*" >&2; exit 1; }
+blank(){ printf '\n'; }
+
+# ---------- 配置读写 ----------
+conf_get() {
+  local k="$1" v=""
+  [ -f "$CONFIG_FILE" ] || { printf ''; return; }
+  v=$(grep -E "^[[:space:]]*$k[[:space:]]*=" "$CONFIG_FILE" 2>/dev/null | tail -1 | sed -E "s/^[[:space:]]*$k[[:space:]]*=[[:space:]]*//")
+  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+  printf '%s' "$v"
+}
+
+conf_get_or() {
+  local v
+  v="$(conf_get "$1")"
+  printf '%s' "${v:-$2}"
+}
+
+conf_set() {
+  local k="$1" v="$2" tmp
+  case "$v" in *'"'*) die "配置值里不能包含双引号：$k" ;; esac
+  touch "$CONFIG_FILE"
+  if grep -qE "^[[:space:]]*$k[[:space:]]*=" "$CONFIG_FILE"; then
+    tmp="$(mktemp)"
+    awk -v k="$k" -v v="$v" '
+      !done && $0 ~ "^[[:space:]]*" k "[[:space:]]*=" { print k "=\"" v "\""; done=1; next }
+      { print }
+    ' "$CONFIG_FILE" > "$tmp" && mv "$tmp" "$CONFIG_FILE"
+  else
+    printf '%s="%s"\n' "$k" "$v" >> "$CONFIG_FILE"
+  fi
+}
+
+# 用户可能写 ~/x、$HOME/x 或 ${HOME}/x，统一展开成绝对路径
+expand_path() {
+  local p="$1"
+  p="${p#"${p%%[![:space:]]*}"}"
+  p="${p%"${p##*[![:space:]]}"}"
+  p="${p%/}"
+  case "$p" in
+    "~")            printf '%s' "$HOME_REAL" ;;
+    "~/"*)          printf '%s' "$HOME_REAL/${p#\~/}" ;;
+    '$HOME')        printf '%s' "$HOME_REAL" ;;
+    '${HOME}')      printf '%s' "$HOME_REAL" ;;
+    '$HOME/'*)      printf '%s' "$HOME_REAL/${p#\$HOME/}" ;;
+    '${HOME}/'*)    printf '%s' "$HOME_REAL/${p#\$\{HOME\}/}" ;;
+    *)              printf '%s' "$p" ;;
+  esac
+}
+
+# ---------- 定时任务 ----------
+build_time_slots() {
+  local times="$1" slots="" t h m
+  IFS=',' read -ra _ts <<< "$times"
+  for t in ${_ts[@]+"${_ts[@]}"}; do
+    t="$(printf '%s' "$t" | tr -d '[:space:]')"
+    [ -n "$t" ] || continue
+    h="${t%%:*}"; m="${t##*:}"
+    case "${h}${m}" in *[!0-9]*) warn "忽略非法时间：$t"; continue ;; esac
+    h=$((10#$h)); m=$((10#$m))
+    if [ "$h" -gt 23 ] || [ "$m" -gt 59 ]; then warn "忽略非法时间：$t"; continue; fi
+    slots="${slots}        <dict>
+            <key>Hour</key><integer>$h</integer>
+            <key>Minute</key><integer>$m</integer>
+        </dict>
+"
+  done
+  printf '%s' "$slots"
+}
+
+write_plists() {
+  local times unlock slots
+  times="$(conf_get TIMES)"
+  unlock="$(conf_get_or SYNC_ON_UNLOCK 0)"
+  mkdir -p "$AGENT_DIR"
+
+  # 时间触发
+  if [ -n "$(printf '%s' "$times" | tr -d '[:space:],')" ]; then
+    slots="$(build_time_slots "$times")"
+    if [ -n "$slots" ]; then
+      cat > "$PLIST_TIMER" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$L_TIMER</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$ENGINE</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <array>
+$slots    </array>
+    <key>StandardOutPath</key><string>$STATE_DIR/launchd.out.log</string>
+    <key>StandardErrorPath</key><string>$STATE_DIR/launchd.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityIO</key><true/>
+    <key>Nice</key><integer>5</integer>
+</dict>
+</plist>
+EOF
+      plutil -lint "$PLIST_TIMER" >/dev/null 2>&1 || warn "定时 plist 格式有误"
+    fi
+  else
+    rm -f "$PLIST_TIMER"
+  fi
+
+  # 解锁触发：每 60 秒醒来检查一次「屏幕是否已解锁 + 距上次同步多久」
+  if [ "$unlock" = "1" ]; then
+    cat > "$PLIST_UNLOCK" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>$L_UNLOCK</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>$ENGINE</string>
+        <string>-u</string>
+    </array>
+    <key>StartInterval</key><integer>60</integer>
+    <key>StandardOutPath</key><string>$STATE_DIR/launchd.out.log</string>
+    <key>StandardErrorPath</key><string>$STATE_DIR/launchd.err.log</string>
+    <key>ProcessType</key><string>Background</string>
+    <key>LowPriorityIO</key><true/>
+    <key>Nice</key><integer>10</integer>
+</dict>
+</plist>
+EOF
+    plutil -lint "$PLIST_UNLOCK" >/dev/null 2>&1 || warn "解锁 plist 格式有误"
+  else
+    rm -f "$PLIST_UNLOCK"
+  fi
+}
+
+agent_loaded() {
+  launchctl print "gui/$UID_NUM/$1" >/dev/null 2>&1
+}
+
+# 取「用户登录 shell」的真实 PATH。
+# 注意：本脚本启动时就 export 过 PATH，直接调用 zsh 会继承它，得到假的“已配置”。
+# 所以用 env -i 清空环境再起登录 shell，只保留最小变量。
+login_path() {
+  /usr/bin/env -i \
+    HOME="$HOME_REAL" \
+    USER="${USER:-$(id -un)}" \
+    LOGNAME="${LOGNAME:-$(id -un)}" \
+    SHELL=/bin/zsh TERM=dumb \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    /bin/zsh -lc 'printf "%s" "$PATH"' 2>/dev/null
+}
+
+path_has_cli() {
+  case ":$(login_path):" in
+    *":$HOME_REAL/.local/bin:"*) return 0 ;;
+  esac
+  return 1
+}
+
+load_agents() {
+  local ok=1 e
+  LOAD_ERR=""
+  launchctl bootout "gui/$UID_NUM/$L_TIMER"  2>/dev/null
+  launchctl bootout "gui/$UID_NUM/$L_UNLOCK" 2>/dev/null
+  launchctl bootout "gui/$UID_NUM/$L_LEGACY" 2>/dev/null
+  if [ -f "$PLIST_TIMER" ]; then
+    if ! e="$(launchctl bootstrap "gui/$UID_NUM" "$PLIST_TIMER" 2>&1)"; then
+      ok=0; LOAD_ERR="${LOAD_ERR}${e}"$'\n'
+    fi
+  fi
+  if [ -f "$PLIST_UNLOCK" ]; then
+    if ! e="$(launchctl bootstrap "gui/$UID_NUM" "$PLIST_UNLOCK" 2>&1)"; then
+      ok=0; LOAD_ERR="${LOAD_ERR}${e}"$'\n'
+    fi
+  fi
+  [ "$ok" -eq 1 ]
+}
+
+unload_agents() {
+  launchctl bootout "gui/$UID_NUM/$L_TIMER"  2>/dev/null
+  launchctl bootout "gui/$UID_NUM/$L_UNLOCK" 2>/dev/null
+  launchctl bootout "gui/$UID_NUM/$L_LEGACY" 2>/dev/null
+  return 0
+}
+
+# ---------- 安装 ----------
+deploy_files() {
+  local reset_tpl="$1"
+  mkdir -p "$BIN_DIR" "$CONF_DIR" "$STATE_DIR" "$AGENT_DIR"
+
+  if [ "$SRC_DIR" != "$BIN_DIR" ]; then
+    cp -f "$SRC_DIR/git-sync.sh" "$BIN_DIR/git-sync.sh" || die "复制引擎失败"
+    cp -f "$SRC_DIR/gsync" "$BIN_DIR/gsync" || die "复制 gsync 失败"
+    if [ -d "$SRC_DIR/ui" ]; then
+      mkdir -p "$BIN_DIR/ui"
+      cp -f "$SRC_DIR"/ui/* "$BIN_DIR/ui/" 2>/dev/null
+    fi
+  fi
+  chmod +x "$BIN_DIR/git-sync.sh" "$BIN_DIR/gsync" 2>/dev/null
+
+  if [ -f "$SRC_DIR/report-template.html" ]; then
+    if [ "$reset_tpl" = "1" ] || [ ! -f "$CONF_DIR/report-template.html" ]; then
+      cp -f "$SRC_DIR/report-template.html" "$CONF_DIR/report-template.html"
+      step "报告模板 → $CONF_DIR/report-template.html"
+    else
+      step "已有自定义报告模板，保留不动"
+    fi
+  fi
+
+  if [ ! -f "$CONFIG_FILE" ]; then
+    if [ -f "$SRC_DIR/config.conf.example" ]; then
+      cp -f "$SRC_DIR/config.conf.example" "$CONFIG_FILE"
+    else
+      cat > "$CONFIG_FILE" <<'EOF'
+ROOTS="$HOME/Documents/gitlab"
+TIMES="08:50,13:50"
+SYNC_ON_UNLOCK=1
+UNLOCK_MIN_INTERVAL=60
+SCAN_DEPTH=2
+PROVIDER_NAME="GitLab"
+EOF
+    fi
+    step "生成配置 → $CONFIG_FILE"
+  else
+    step "已有配置，保留不动"
+  fi
+
+  if [ ! -f "$NOTIFY_FILE" ]; then
+    if [ -f "$SRC_DIR/notify.conf" ]; then
+      cp -f "$SRC_DIR/notify.conf" "$NOTIFY_FILE"
+      step "导入随包推送配置"
+    elif [ -f "$SRC_DIR/notify.conf.example" ]; then
+      cp -f "$SRC_DIR/notify.conf.example" "$NOTIFY_FILE"
+      step "生成推送配置（需填 token）"
+    else
+      cat > "$NOTIFY_FILE" <<'EOF'
+# 推送通道：pushplus（微信）/ wecom（企业微信群机器人）/ bark（iOS）
+# 不需要手机提醒就留空，脚本会跳过推送，其余功能照常。
+NOTIFY_TYPE=
+PUSHPLUS_TOKEN=
+WECOM_WEBHOOK=
+BARK_KEY=
+
+# 每次运行都推送（1=是，默认只在状态变化时推）
+# PUSH_ALWAYS=1
+
+# 自定义设备名，默认取「系统设置 → 通用 → 关于本机」
+# DEVICE_NAME=
+EOF
+      step "生成推送配置（默认不推送）"
+    fi
+    chmod 600 "$NOTIFY_FILE" 2>/dev/null
+  fi
+
+  ensure_cli_link
+}
+
+# 让 gsync 能当命令用：建软链 + 必要时自动写 PATH
+ensure_cli_link() {
+  mkdir -p "$HOME_REAL/.local/bin"
+  ln -sf "$BIN_DIR/gsync" "$HOME_REAL/.local/bin/gsync" 2>/dev/null
+
+  # 登录 shell 的 PATH 里已经有就直接结束
+  if path_has_cli; then
+    CLI_ON_PATH=1
+    return 0
+  fi
+
+  # zsh 的 PATH 要写 .zshenv：它对所有 zsh 生效（含非交互、含 IDE 内置终端）；
+  # 写 .zshrc 只在交互式终端生效，脚本与自动化里仍然找不到命令。
+  local rc
+  case "${SHELL##*/}" in
+    bash) rc="$HOME_REAL/.bash_profile"; [ -f "$rc" ] || rc="$HOME_REAL/.profile" ;;
+    *)    rc="$HOME_REAL/.zshenv" ;;
+  esac
+  if ! /usr/bin/grep -q 'gsync: PATH' "$rc" 2>/dev/null; then
+    [ -s "$rc" ] && printf '\n' >> "$rc"
+    printf '# gsync: PATH（由 gsync install 自动添加）\n' >> "$rc"
+    printf 'export PATH="$HOME/.local/bin:$PATH"\n' >> "$rc"
+    CLI_RC_WRITTEN="$rc"
+  fi
+  CLI_ON_PATH=2
+}
+
+cmd_install() {
+  local root="" times="" unlock="" no_load=0 no_run=0 reset_tpl=0 assume_yes=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --root)   root="${2:-}"; shift 2 ;;
+      --time)   times="${2:-}"; shift 2 ;;
+      --unlock) unlock="${2:-}"; shift 2 ;;
+      --no-load) no_load=1; shift ;;
+      --no-run) no_run=1; shift ;;
+      --reset-template) reset_tpl=1; shift ;;
+      -y|--yes) assume_yes=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+
+  command -v git >/dev/null 2>&1 || die "未找到 git"
+  command -v jq  >/dev/null 2>&1 || die "未找到 jq，请先执行：brew install jq"
+  command -v python3 >/dev/null 2>&1 || warn "未找到 python3，HTML 报告会降级为纯文本"
+
+  step "安装到 $BIN_DIR"
+  deploy_files "$reset_tpl"
+
+  # ---- 仓库目录 ----
+  local existing; existing="$(conf_get ROOTS)"
+  if [ -n "$root" ]; then
+    conf_set ROOTS "$root"
+  elif interactive && [ "$assume_yes" -eq 0 ]; then
+    local guess c
+    guess="$(conf_get ROOTS)"
+    if [ -z "$guess" ]; then
+      for c in "$HOME_REAL/Documents/gitlab" "$HOME_REAL/code" "$HOME_REAL/Projects" "$HOME_REAL/WebstormProjects"; do
+        [ -d "$c" ] && { guess="$c"; break; }
+      done
+    fi
+    printf '仓库根目录 [%s]：' "$guess"
+    read -r -t 120 ans
+    [ -n "$ans" ] && guess="$(expand_path "$ans")"
+    conf_set ROOTS "$guess"
+  fi
+
+  # ---- 同步时间 ----
+  if [ -n "$times" ]; then
+    conf_set TIMES "$times"
+  elif interactive && [ "$assume_yes" -eq 0 ]; then
+    printf '每天同步时间（逗号分隔，留空=不启用定时）[%s]：' "$(conf_get TIMES)"
+    read -r -t 120 ans
+    [ -n "$ans" ] && conf_set TIMES "$ans"
+  fi
+
+  # ---- 解锁触发 ----
+  if [ -n "$unlock" ]; then
+    case "$unlock" in
+      on|1|yes|true) conf_set SYNC_ON_UNLOCK 1 ;;
+      off|0|no|false) conf_set SYNC_ON_UNLOCK 0 ;;
+      *) die "--unlock 只接受 on / off" ;;
+    esac
+  elif interactive && [ "$assume_yes" -eq 0 ]; then
+    local cur; cur="$(conf_get_or SYNC_ON_UNLOCK 0)"
+    printf '解锁屏幕后自动同步一次？[%s]：' "$([ "$cur" = "1" ] && echo Y/n || echo y/N)"
+    read -r -t 120 ans
+    case "$ans" in
+      y|Y|yes) conf_set SYNC_ON_UNLOCK 1 ;;
+      n|N|no)  conf_set SYNC_ON_UNLOCK 0 ;;
+    esac
+  fi
+
+  # ---- 校验仓库目录 ----
+  local roots fail=0
+  roots="$(conf_get ROOTS)"
+  IFS=',' read -ra _rs <<< "$roots"
+  for r in ${_rs[@]+"${_rs[@]}"}; do
+    r="$(expand_path "$r")"
+    [ -z "$r" ] && continue
+    if [ -d "$r" ]; then
+      local n; n=$(find "$r" -maxdepth "$(conf_get_or SCAN_DEPTH 2)" -type d -name .git 2>/dev/null | wc -l | tr -d ' ')
+      step "仓库目录 ${r}（发现 ${n} 个仓库）"
+    else
+      warn "目录不存在：$r"
+      fail=1
+    fi
+  done
+  [ "$fail" -eq 1 ] && warn "有目录不可用，可在 gsync ui 里修改"
+
+  # ---- 生成并加载 ----
+  step "生成定时任务"
+  write_plists
+  [ -f "$PLIST_TIMER" ] && step "时间触发：$(conf_get TIMES) → $(basename "$PLIST_TIMER")"
+  [ -f "$PLIST_UNLOCK" ] && step "解锁触发：每 60 秒检查一次 → $(basename "$PLIST_UNLOCK")"
+
+  if [ "$no_load" -eq 1 ]; then
+    step "已跳过加载（--no-load）"
+    say "稍后手动加载：gsync reload"
+    return 0
+  fi
+
+  step "加载定时任务"
+  if load_agents; then
+    say "    已加载"
+  else
+    warn "加载失败。常见原因与处理："
+    say "    · 需要在「终端」App 里执行，不是 IDE 内置终端"
+    say "    · ~/Documents 受隐私保护，需给 /bin/bash 开「完全磁盘访问权限」"
+    say "      系统设置 → 隐私与安全性 → 完全磁盘访问权限 → + → Cmd+Shift+G → /bin/bash"
+    say "    · 授权后重试：gsync reload"
+    return 1
+  fi
+
+  if [ "$no_run" -eq 0 ]; then
+    blank
+    step "立即试跑一次"
+    bash "$ENGINE" -v 2>&1 | tail -25
+  fi
+
+  blank
+  say "${C_G}安装完成${C_0}"
+  say "  配置    $CONFIG_FILE"
+  say "  报告    $STATE_DIR/last-report.html"
+  say "  日志    $STATE_DIR/sync.log"
+  say "  命令    gsync ui     可视化配置"
+  say "          gsync status 查看状态"
+  case "${CLI_ON_PATH:-0}" in
+    1) say "  命令位置 $HOME_REAL/.local/bin/gsync（已在 PATH 中，可直接用） " ;;
+    2) say "  命令位置 $HOME_REAL/.local/bin/gsync"
+       [ -n "${CLI_RC_WRITTEN:-}" ] && say "  已把该目录写入 $CLI_RC_WRITTEN，新开终端后 gsync 可直接用"
+       say "          当前终端立即生效：source $([ -n "${CLI_RC_WRITTEN:-}" ] && echo "$CLI_RC_WRITTEN" || echo "$HOME_REAL/.zshrc")" ;;
+    0) say "  提示    若提示 gsync 找不到，用完整路径：$BIN_DIR/gsync" ;;
+  esac
+}
+
+# ---------- 卸载 ----------
+cmd_uninstall() {
+  local purge=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --purge) purge=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+  step "停止定时任务"
+  unload_agents
+  rm -f "$PLIST_TIMER" "$PLIST_UNLOCK" "$AGENT_DIR/$L_LEGACY.plist"
+  say "    已移除 LaunchAgent"
+  if [ "$purge" -eq 1 ]; then
+    rm -rf "$BIN_DIR" "$CONF_DIR" "$STATE_DIR"
+    rm -f "$HOME_REAL/.local/bin/gsync"
+    say "    已删除脚本、配置与状态"
+  else
+    say "    配置与状态保留（--purge 可一并删除）"
+  fi
+}
+
+# ---------- 重载 ----------
+cmd_reload() {
+  [ -x "$BIN_DIR/git-sync.sh" ] || die "尚未安装，先执行 gsync install"
+  step "按当前配置重新生成定时任务"
+  write_plists
+  step "重新加载"
+  if load_agents; then
+    say "    已加载"
+  else
+    local first_err; first_err="$(printf '%s' "$LOAD_ERR" | sed '/^$/d' | head -1)"
+    warn "加载失败${first_err:+：$first_err}"
+    say "    常见原因与处理："
+    say "      1) 不是在图形登录会话里执行（例如在 IDE / WorkBuddy 内置终端）"
+    say "         → 打开「终端」App，执行：bash $BIN_DIR/gsync reload"
+    say "      2) /bin/bash 未获「完全磁盘访问权限」"
+    say "         → 系统设置 → 隐私与安全性 → 完全磁盘访问权限，添加 /bin/bash"
+    say "      3) 上面两条都排除了，重启一次再试（launchd 偶发卡在异常状态）"
+    return 1
+  fi
+  say "  时间触发：$(conf_get TIMES)"
+  say "  解锁触发：$([ "$(conf_get_or SYNC_ON_UNLOCK 0)" = "1" ] && echo 启用 || echo 关闭)"
+}
+
+# ---------- 运行 ----------
+cmd_run() {
+  [ -f "$ENGINE" ] || die "尚未安装：$ENGINE 不存在，先执行 gsync install"
+  exec /bin/bash "$ENGINE" "$@"
+}
+
+# ---------- 状态 ----------
+cmd_status() {
+  [ -f "$CONFIG_FILE" ] || die "尚未安装或缺少配置，先执行 gsync install"
+  local roots times unlock interval depth provider
+  roots="$(conf_get ROOTS)"
+  times="$(conf_get TIMES)"
+  unlock="$(conf_get_or SYNC_ON_UNLOCK 0)"
+  interval="$(conf_get_or UNLOCK_MIN_INTERVAL 60)"
+  depth="$(conf_get_or SCAN_DEPTH 2)"
+  provider="$(conf_get_or PROVIDER_NAME GitLab)"
+
+  printf '%s配置%s\n' "$C_B" "$C_0"
+  local roots_disp="" _rr
+  IFS=',' read -ra _rrs <<< "$roots"
+  for _rr in ${_rrs[@]+"${_rrs[@]}"}; do
+    _rr="$(expand_path "$_rr")"
+    [ -n "$_rr" ] && roots_disp="${roots_disp}${_rr}  "
+  done
+  printf '  仓库目录   %s\n' "${roots_disp:-（未设置）}"
+  printf '  同步时间   %s\n' "${times:-（未启用定时）}"
+  printf '  解锁同步   %s\n' "$([ "$unlock" = "1" ] && echo "已启用（间隔 ${interval:-60} 分钟）" || echo 已关闭)"
+  printf '  扫描深度   %s\n' "${depth:-2}"
+  printf '  产品名     %s\n' "${provider:-GitLab}"
+  blank
+
+  printf '%s定时任务%s\n' "$C_B" "$C_0"
+  local st
+  if agent_loaded "$L_TIMER"; then st="${C_G}已加载${C_0}"; else st="${C_D}未加载${C_0}"; fi
+  printf '  时间触发   %s%s\n' "$st" "$([ -f "$PLIST_TIMER" ] && echo "" || echo "（无 plist）")"
+  if agent_loaded "$L_UNLOCK"; then st="${C_G}已加载${C_0}"; else st="${C_D}未加载${C_0}"; fi
+  printf '  解锁触发   %s%s\n' "$st" "$([ -f "$PLIST_UNLOCK" ] && echo "" || echo "（无 plist）")"
+  blank
+
+  if [ ! -f "$STATE_DIR/state.json" ]; then
+    say "还没有运行记录。执行：gsync run"
+    return 0
+  fi
+
+  local ts
+  ts="$(jq -r '.timestamp // ""' "$STATE_DIR/state.json" 2>/dev/null \
+        | sed -E 's/^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}:[0-9]{2}:[0-9]{2}).*/\1 \2/')"
+  printf '%s最近一次%s  %s\n' "$C_B" "$C_0" "$ts"
+  jq -r '.summary | "  共 \(.total) 个仓库：更新 \(.updated)｜已最新 \(.uptodate)｜跳过 \(.skipped)｜异常 \(.error)"' \
+    "$STATE_DIR/state.json" 2>/dev/null
+  blank
+
+  printf '%s仓库%s\n' "$C_B" "$C_0"
+  jq -r '
+    def st_label: {updated:"已更新","would-update":"可更新",uptodate:"已最新",ahead:"待推送",
+                dirty:"有改动",diverged:"已分叉",conflict:"冲突中",busy:"处理中",
+                detached:"游离 HEAD",locked:"锁残留","blocked-untracked":"未跟踪冲突",
+                noupstream:"无上游",error:"异常"}[.] // .;
+    def st_rank: {error:0,conflict:1,busy:1,diverged:1,locked:1,"blocked-untracked":1,
+               detached:2,ahead:3,dirty:3,updated:4,"would-update":4,uptodate:5,noupstream:6}[.] // 7;
+    .repos | sort_by(.status|st_rank) | .[]
+    | "  \(.status|st_label)\t\(.name)\t\(if .branch=="" or .branch==null then "—" else .branch end)\t\(.detail)"
+  ' "$STATE_DIR/state.json" 2>/dev/null | awk -F'\t' '{printf "  %-14s %-30s %-32s %s\n", $1, $2, $3, $4}'
+  blank
+  say "报告 $STATE_DIR/last-report.html"
+}
+
+# ---------- 配置 ----------
+cmd_config() {
+  local do_edit=0 _k _v
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --edit|-e) do_edit=1; shift ;;
+      --set) shift; [ $# -gt 0 ] || die "--set 需要 KEY=VALUE"; _k="${1%%=*}"; _v="${1#*=}"; conf_set "$_k" "$_v"; say "已设置 $_k=$_v"; shift ;;
+      --show|"") shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+  if [ "$do_edit" -eq 1 ]; then
+    ${EDITOR:-open -e} "$CONFIG_FILE"
+    return 0
+  fi
+  say "配置文件：$CONFIG_FILE"
+  blank
+  grep -vE '^[[:space:]]*$' "$CONFIG_FILE" 2>/dev/null | sed 's/^/  /'
+  blank
+  say "改完执行 gsync reload 让定时任务生效；或 gsync ui 可视化编辑。"
+}
+
+# ---------- 可视化界面 ----------
+cmd_ui() {
+  local port=7788 no_open=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --port) port="${2:-7788}"; shift 2 ;;
+      --no-open) no_open=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+  local ui_dir="$BIN_DIR/ui"
+  [ -f "$ui_dir/server.py" ] || ui_dir="$SRC_DIR/ui"
+  [ -f "$ui_dir/server.py" ] || die "缺少 ui/server.py"
+  command -v python3 >/dev/null 2>&1 || die "需要 python3"
+
+  # URL 与浏览器由 server.py 负责打印/打开：端口被占用时它会自动改端口，
+  # 在这里打印会让用户看到错误的地址。
+  local _args=("--port" "$port" --home "$HOME_REAL")
+  [ "$no_open" -eq 1 ] && _args+=(--no-open)
+  exec python3 "$ui_dir/server.py" "${_args[@]}"
+}
+
+# ---------- 日志 ----------
+cmd_log() {
+  local n=40 follow=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-40}"; shift 2 ;;
+      -f) follow=1; shift ;;
+      *) die "未知参数：$1" ;;
+    esac
+  done
+  [ -f "$STATE_DIR/sync.log" ] || die "还没有日志：$STATE_DIR/sync.log"
+  if [ "$follow" -eq 1 ]; then tail -f -n "$n" "$STATE_DIR/sync.log"; else tail -n "$n" "$STATE_DIR/sync.log"; fi
+}
+
+# ---------- 自检 ----------
+cmd_doctor() {
+  local ok=0
+  chk() {
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then printf '  %s✓%s %s\n' "$C_G" "$C_0" "$name"
+    else printf '  %s✗%s %s\n' "$C_R" "$C_0" "$name"; ok=1; fi
+  }
+  printf '%s依赖%s\n' "$C_B" "$C_0"
+  chk "git"     command -v git
+  chk "jq"      command -v jq
+  chk "python3" command -v python3
+  chk "curl"    command -v curl
+  blank
+
+  printf '%s安装%s\n' "$C_B" "$C_0"
+  chk "引擎 $ENGINE"            test -f "$ENGINE"
+  chk "配置 $CONFIG_FILE"       test -f "$CONFIG_FILE"
+  chk "报告模板"                test -f "$CONF_DIR/report-template.html"
+  if path_has_cli; then
+    printf '  %s✓%s gsync 命令已在 PATH\n' "$C_G" "$C_0"
+  else
+    printf '  %s·%s gsync 不在 PATH —— 需 source ~/.zshrc，或改用 %s\n' "$C_Y" "$C_0" "$BIN_DIR/gsync"
+  fi
+  blank
+
+  printf '%s仓库目录%s\n' "$C_B" "$C_0"
+  local roots r
+  roots="$(conf_get ROOTS)"
+  IFS=',' read -ra _rs <<< "$roots"
+  for r in ${_rs[@]+"${_rs[@]}"}; do
+    r="$(expand_path "$r")"; [ -z "$r" ] && continue
+    if [ -d "$r" ] && ls "$r" >/dev/null 2>&1; then
+      local n; n=$(find "$r" -maxdepth "$(conf_get_or SCAN_DEPTH 2)" -type d -name .git 2>/dev/null | wc -l | tr -d ' ')
+      printf '  %s✓%s %s（%s 个仓库）\n' "$C_G" "$C_0" "$r" "$n"
+    else
+      printf '  %s✗%s %s —— 不存在，或被隐私保护拦截\n' "$C_R" "$C_0" "$r"
+      ok=1
+    fi
+  done
+  blank
+
+  printf '%s定时任务%s\n' "$C_B" "$C_0"
+  if agent_loaded "$L_TIMER"; then printf '  %s✓%s 时间触发 已加载\n' "$C_G" "$C_0"
+  else printf '  %s·%s 时间触发 未加载%s\n' "$C_Y" "$C_0" "$([ -f "$PLIST_TIMER" ] && echo "（执行 gsync reload）" || echo "（配置里 TIMES 为空）")"; fi
+  if agent_loaded "$L_UNLOCK"; then printf '  %s✓%s 解锁触发 已加载\n' "$C_G" "$C_0"
+  else printf '  %s·%s 解锁触发 未加载%s\n' "$C_Y" "$C_0" "$([ -f "$PLIST_UNLOCK" ] && echo "（执行 gsync reload）" || echo "（配置里已关闭）")"; fi
+  blank
+
+  printf '%s推送%s\n' "$C_B" "$C_0"
+  local nt="" pp_token="" wecom_hook="" bark_key=""
+  if [ -f "$NOTIFY_FILE" ]; then
+    # 必须在同一个子 shell 里取值，否则 source 出来的变量会随子 shell 消失
+    local _dump
+    _dump="$( . "$NOTIFY_FILE" 2>/dev/null; printf '%s\t%s\t%s\t%s' \
+              "${NOTIFY_TYPE:-}" "${PUSHPLUS_TOKEN:-}" "${WECOM_WEBHOOK:-}" "${BARK_KEY:-}" )"
+    IFS=$'\t' read -r nt pp_token wecom_hook bark_key <<< "$_dump"
+  fi
+  case "$nt" in
+    pushplus) [ -n "$pp_token" ]   && printf '  %s✓%s PushPlus 已配置\n' "$C_G" "$C_0" || printf '  %s·%s PushPlus 缺 token，不会推送\n' "$C_Y" "$C_0" ;;
+    wecom)    [ -n "$wecom_hook" ] && printf '  %s✓%s 企业微信机器人 已配置\n' "$C_G" "$C_0" || printf '  %s·%s 缺 Webhook\n' "$C_Y" "$C_0" ;;
+    bark)     [ -n "$bark_key" ]   && printf '  %s✓%s Bark 已配置\n' "$C_G" "$C_0" || printf '  %s·%s 缺 BARK_KEY\n' "$C_Y" "$C_0" ;;
+    *)        printf '  %s·%s 未配置推送（不影响同步）\n' "$C_Y" "$C_0" ;;
+  esac
+  blank
+  [ "$ok" -eq 0 ] && say "自检通过" || say "存在待处理项，见上方 ✗"
+  return 0
+}
+
+# ---------- 帮助 ----------
+usage() { sed -n '2,24p' "$0" | grep -E '^#' | sed 's/^# \{0,1\}//'; }
+
+# ---------- 分发 ----------
+CMD="${1:-help}"
+[ $# -gt 0 ] && shift
+case "$CMD" in
+  install)   cmd_install "$@" ;;
+  uninstall|remove) cmd_uninstall "$@" ;;
+  reload|apply) cmd_reload "$@" ;;
+  run|sync)  cmd_run "$@" ;;
+  status|st) cmd_status "$@" ;;
+  config|conf) cmd_config "$@" ;;
+  ui|web)    cmd_ui "$@" ;;
+  log|logs)  cmd_log "$@" ;;
+  doctor|check) cmd_doctor "$@" ;;
+  help|-h|--help) usage ;;
+  *) say "未知命令：$CMD"; blank; usage; exit 1 ;;
+esac
